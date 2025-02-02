@@ -14,7 +14,7 @@
 #ifndef LAB1_CUH
 #define LAB1_CUH
 
-	// #define DEBUG_PRINT_DISABLE
+	#define DEBUG_PRINT_DISABLE
 	
 	#define VECTOR_SIZE (1 << 15)
 

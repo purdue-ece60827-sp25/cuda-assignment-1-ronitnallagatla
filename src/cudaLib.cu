@@ -1,5 +1,6 @@
 
 #include "cudaLib.cuh"
+#include <cstdint>
 
 inline void gpuAssert(cudaError_t code, const char *file, int line,
                       bool abort) {
@@ -22,7 +23,6 @@ int runGpuSaxpy(int vectorSize) {
 
   std::cout << "Hello GPU Saxpy!\n";
 
-  //	Insert code here
   uint64_t size = vectorSize * sizeof(float);
 
   float *x, *y, *y_init;
@@ -45,21 +45,23 @@ int runGpuSaxpy(int vectorSize) {
 
   cudaError_t err;
   err = cudaMalloc((void **)&x_d, size);
+  gpuErrchk(err);
+
   err = cudaMalloc((void **)&y_d, size);
+  gpuErrchk(err);
 
-  if (err != cudaSuccess) {
-    printf("cudaMalloc: unable to malloc memory");
-    return -1;
-  }
+  err = cudaMemcpy(x_d, x, size, cudaMemcpyHostToDevice);
+  gpuErrchk(err);
 
-  cudaMemcpy(x_d, x, size, cudaMemcpyHostToDevice);
-  cudaMemcpy(y_d, y, size, cudaMemcpyHostToDevice);
+  err = cudaMemcpy(y_d, y, size, cudaMemcpyHostToDevice);
+  gpuErrchk(err);
 
   // Launch kernel
   // 256 threads in a TB
   saxpy_gpu<<<(vectorSize + 255) / 256, 256>>>(x_d, y_d, scale, vectorSize);
 
-  cudaMemcpy(y, y_d, size, cudaMemcpyDeviceToHost);
+  err = cudaMemcpy(y, y_d, size, cudaMemcpyDeviceToHost);
+  gpuErrchk(err);
 
   int error_count = verifyVector(x, y_init, y, scale, vectorSize);
   std::cout << "Found " << error_count << " / " << vectorSize << " errors \n";
@@ -88,12 +90,47 @@ int runGpuSaxpy(int vectorSize) {
 
 __global__ void generatePoints(uint64_t *pSums, uint64_t pSumSize,
                                uint64_t sampleSize) {
-  //	Insert code here
+
+  int tid = threadIdx.x + blockDim.x * blockIdx.x;
+
+  if (tid >= pSumSize)
+    return;
+
+  float x, y;
+  uint64_t hit_count = 0;
+
+  curandState_t rng;
+  curand_init(clock64(), tid, 0, &rng);
+
+  for (int i = 0; i < sampleSize; ++i) {
+    x = curand_uniform(&rng);
+    y = curand_uniform(&rng);
+
+    if (x * x + y * y <= 1.0f) {
+      ++hit_count;
+    }
+  }
+
+  pSums[tid] = hit_count;
 }
 
 __global__ void reduceCounts(uint64_t *pSums, uint64_t *totals,
                              uint64_t pSumSize, uint64_t reduceSize) {
-  //	Insert code here
+
+  int tid = threadIdx.x + blockDim.x * blockIdx.x;
+
+
+  if (tid >= pSumSize / reduceSize)
+    return;
+
+
+  uint64_t reduced_sum = 0;
+  for (int i = 0; i < reduceSize; ++i) {
+    // assert((reduceSize * tid + i) < pSumSize);
+    reduced_sum += pSums[reduceSize * tid + i];
+  }
+
+  totals[tid] = reduced_sum;
 }
 
 int runGpuMCPi(uint64_t generateThreadCount, uint64_t sampleSize,
@@ -112,6 +149,7 @@ int runGpuMCPi(uint64_t generateThreadCount, uint64_t sampleSize,
   float approxPi = estimatePi(generateThreadCount, sampleSize,
                               reduceThreadCount, reduceSize);
 
+  std::cout << std::setprecision(10);
   std::cout << "Estimated Pi = " << approxPi << "\n";
 
   auto tEnd = std::chrono::high_resolution_clock::now();
@@ -126,9 +164,39 @@ double estimatePi(uint64_t generateThreadCount, uint64_t sampleSize,
                   uint64_t reduceThreadCount, uint64_t reduceSize) {
 
   double approxPi = 0;
+  uint64_t total_hits = 0;
 
-  //      Insert code here
-  std::cout << "Sneaky, you are ...\n";
-  std::cout << "Compute pi, you must!\n";
+  std::vector<uint64_t> totals(reduceThreadCount);
+
+  uint64_t *pSums_d, *totals_d;
+  cudaError_t err;
+
+  err = cudaMalloc((void **)&pSums_d, generateThreadCount * sizeof(uint64_t));
+  gpuErrchk(err);
+
+  err = cudaMalloc((void **)&totals_d, reduceThreadCount * sizeof(uint64_t));
+  gpuErrchk(err);
+
+  generatePoints<<<(generateThreadCount + 255) / 256, 256>>>(
+      pSums_d, generateThreadCount, sampleSize);
+
+  reduceCounts<<<(reduceThreadCount + 255) / 256, 256>>>(
+      pSums_d, totals_d, generateThreadCount, reduceSize);
+
+  err =
+      cudaMemcpy(totals.data(), totals_d, sizeof(uint64_t) * reduceThreadCount,
+                 cudaMemcpyDeviceToHost);
+
+  gpuErrchk(err);
+
+  for (const auto &total : totals) {
+    total_hits += total;
+  }
+
+  approxPi = (((double)total_hits / sampleSize) / generateThreadCount) * 4.0f;
+
+  cudaFree(pSums_d);
+  cudaFree(totals_d);
+
   return approxPi;
 }
